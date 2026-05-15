@@ -1,0 +1,158 @@
+TESTES DO SERVIDOR - PROGRAMADOR DE ATUACAO
+
+1. COMPILAR COM WSL
+
+Abra o terminal WSL dentro da pasta do projeto.
+
+Comandos no WSL:
+
+g++ ESP/programador_de_atuacao_local.cpp -std=c++17 -o ESP/programador_de_atuacao_local
+
+./ESP/programador_de_atuacao_local
+
+OPCIONAL: EXPOR COM NGROK
+
+Em outro terminal:
+
+ngrok http 8180
+
+Depois copie a URL HTTPS gerada pelo ngrok e troque o valor da variavel $BASE nos testes abaixo.
+
+
+2. CONFIGURAR A URL BASE DOS TESTES
+
+Para testar local:
+
+$BASE = "http://localhost:8180"
+
+Para testar pelo ngrok:
+
+$BASE = "https://SUA-URL-DO-NGROK.ngrok-free.app"
+
+Header usado para evitar a pagina de aviso do ngrok:
+
+$HEADERS = @{ "ngrok-skip-browser-warning" = "true" }
+
+
+3. TESTAR STATUS DO SERVIDOR
+
+Invoke-RestMethod -Method Get -Uri "$BASE/health" -Headers $HEADERS
+
+Invoke-RestMethod -Method Get -Uri "$BASE/" -Headers $HEADERS
+
+
+4. SALVAR PARAMETRIZACAO DE SENSIBILIDADE
+
+Invoke-RestMethod `
+  -Method Post `
+  -Uri "$BASE/parametrizar" `
+  -Headers $HEADERS `
+  -ContentType "application/json" `
+  -Body '{"sensibilidade":0.7}'
+
+
+5. CONSULTAR PARAMETRIZACAO SALVA
+
+Invoke-RestMethod -Method Get -Uri "$BASE/parametrizar" -Headers $HEADERS
+
+
+6. CADASTRAR PROGRAMA PARA PESSOA APROXIMANDO
+
+Invoke-RestMethod `
+  -Method Post `
+  -Uri "$BASE/adicionar-programa" `
+  -Headers $HEADERS `
+  -ContentType "application/json" `
+  -Body '{"acao":"pessoa_aproximando","objeto":"agua_viva","velocidade":45,"movimento":"pulsar_lento","cor":"azul"}'
+
+
+7. CADASTRAR PROGRAMA PARA MOVIMENTO DE BRAÇO PARA CIMA
+
+Invoke-RestMethod `
+  -Method Post `
+  -Uri "$BASE/adicionar-programa" `
+  -Headers $HEADERS `
+  -ContentType "application/json" `
+  -Body '{"acao":"braco_para_cima","objeto":"agua_viva","velocidade":90,"movimento":"contrair_e_expandir"}'
+
+
+8. LISTAR PROGRAMAS SALVOS
+
+Invoke-RestMethod -Method Get -Uri "$BASE/programas" -Headers $HEADERS
+
+
+9. PROCESSAR ESTIMULO ACEITO: PESSOA APROXIMANDO
+
+Invoke-RestMethod `
+  -Method Post `
+  -Uri "$BASE/processar-estimulo" `
+  -Headers $HEADERS `
+  -ContentType "application/json" `
+  -Body '{"acao_detectada":"pessoa_aproximando","intensidade":0.85}'
+
+
+10. PROCESSAR ESTIMULO ACEITO: BRAÇO PARA CIMA
+
+Invoke-RestMethod `
+  -Method Post `
+  -Uri "$BASE/processar-estimulo" `
+  -Headers $HEADERS `
+  -ContentType "application/json" `
+  -Body '{"acao_detectada":"braco_para_cima","intensidade":0.95}'
+
+
+11. PROCESSAR ESTIMULO IGNORADO POR BAIXA INTENSIDADE
+
+Invoke-RestMethod `
+  -Method Post `
+  -Uri "$BASE/processar-estimulo" `
+  -Headers $HEADERS `
+  -ContentType "application/json" `
+  -Body '{"acao_detectada":"pessoa_aproximando","intensidade":0.2}'
+
+
+12. PROCESSAR ESTIMULO SEM ACAO MAPEADA
+
+try {
+  Invoke-RestMethod `
+    -Method Post `
+    -Uri "$BASE/processar-estimulo" `
+    -Headers $HEADERS `
+    -ContentType "application/json" `
+    -Body '{"acao_detectada":"movimento_desconhecido","intensidade":0.9}'
+} catch {
+  $_.Exception.Response.StatusCode.value__
+  $_.ErrorDetails.Message
+}
+
+
+13. TESTAR JSON INVALIDO
+
+try {
+  Invoke-RestMethod `
+    -Method Post `
+    -Uri "$BASE/adicionar-programa" `
+    -Headers $HEADERS `
+    -ContentType "application/json" `
+    -Body '{"acao":"json_quebrado",'
+} catch {
+  $_.Exception.Response.StatusCode.value__
+  $_.ErrorDetails.Message
+}
+
+
+14. LIMPAR PROGRAMAS
+
+Invoke-RestMethod -Method Delete -Uri "$BASE/programas" -Headers $HEADERS
+
+
+15. CONFERIR QUE OS PROGRAMAS FORAM LIMPOS
+
+Invoke-RestMethod -Method Get -Uri "$BASE/programas" -Headers $HEADERS
+
+
+16. ARQUIVO ONDE OS DADOS FICAM SALVOS
+
+ESP/programador_de_atuacao.dados.json
+
+Esse arquivo mostra a parametrizacao, os programas salvos e os eventos gerados durante os testes.
