@@ -33,6 +33,7 @@ const std::string DATA_FILE = "ESP/programador_de_atuacao.dados.json";
 const int PORT = 8180;
 
 bool running = true;
+std::string parametrizacao = "null";
 double sensibilidadeGlobal = 0.5;
 bool sensibilidadeConfigurada = false;
 std::vector<std::string> programas;
@@ -213,6 +214,62 @@ std::vector<std::string> extractObjectArray(const std::string& json, const std::
   return items;
 }
 
+std::string extractJsonValue(const std::string& json, const std::string& key) {
+  size_t keyPos = json.find("\"" + key + "\"");
+  if (keyPos == std::string::npos) return "";
+
+  size_t colon = json.find(':', keyPos);
+  if (colon == std::string::npos) return "";
+
+  size_t valueStart = json.find_first_not_of(" \r\n\t", colon + 1);
+  if (valueStart == std::string::npos) return "";
+
+  char first = json[valueStart];
+  if (first == 'n' && json.compare(valueStart, 4, "null") == 0) return "null";
+
+  char closing = '\0';
+  if (first == '{') closing = '}';
+  if (first == '[') closing = ']';
+  if (closing == '\0') return "";
+
+  int depth = 0;
+  bool inString = false;
+  bool escaped = false;
+
+  for (size_t i = valueStart; i < json.size(); ++i) {
+    char c = json[i];
+
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+
+    if (c == '\\' && inString) {
+      escaped = true;
+      continue;
+    }
+
+    if (c == '"') {
+      inString = !inString;
+      continue;
+    }
+
+    if (inString) continue;
+
+    if (c == first) {
+      depth++;
+      continue;
+    }
+
+    if (c == closing) {
+      depth--;
+      if (depth == 0) return json.substr(valueStart, i - valueStart + 1);
+    }
+  }
+
+  return "";
+}
+
 void registrarEvento(const std::string& tipo, const std::string& payload) {
   std::ostringstream evento;
   evento << "{\"tipo\":\"" << jsonEscape(tipo)
@@ -229,10 +286,15 @@ void loadData() {
   buffer << file.rdbuf();
   std::string content = buffer.str();
 
+  std::string savedParametrizacao = extractJsonValue(content, "parametrizacao");
+  parametrizacao = savedParametrizacao.empty() ? "null" : savedParametrizacao;
+
   double sensibilidade = 0;
-  if (extractNumber(content, "sensibilidade", sensibilidade)) {
+  if (looksLikeJson(parametrizacao) && extractNumber(parametrizacao, "sensibilidade", sensibilidade)) {
     sensibilidadeGlobal = sensibilidade;
     sensibilidadeConfigurada = true;
+  } else {
+    sensibilidadeConfigurada = false;
   }
 
   programas = extractObjectArray(content, "configuracoes");
@@ -242,13 +304,7 @@ void loadData() {
 void saveData() {
   std::ofstream file(DATA_FILE, std::ios::trunc);
   file << "{\n";
-  file << "  \"parametrizacao\": ";
-  if (sensibilidadeConfigurada) {
-    file << "{\"sensibilidade\":" << sensibilidadeGlobal << "}";
-  } else {
-    file << "null";
-  }
-  file << ",\n";
+  file << "  \"parametrizacao\": " << parametrizacao << ",\n";
   file << "  \"configuracoes\": " << jsonArray(programas) << ",\n";
   file << "  \"eventos\": " << jsonArray(eventos) << "\n";
   file << "}\n";
@@ -267,10 +323,7 @@ std::string statusJson() {
 }
 
 std::string parametrizacaoJson() {
-  if (!sensibilidadeConfigurada) return "null";
-  std::ostringstream out;
-  out << "{\"sensibilidade\":" << sensibilidadeGlobal << "}";
-  return out.str();
+  return parametrizacao;
 }
 
 std::string findProgramaByAcao(const std::string& acaoDetectada) {
@@ -307,9 +360,12 @@ HttpResponse handleRequest(const HttpRequest& request) {
 
     if (request.path == "/parametrizar" || request.path == "/parametrizacao") {
       double sensibilidade = 0;
+      parametrizacao = request.body;
       if (extractNumber(request.body, "sensibilidade", sensibilidade)) {
         sensibilidadeGlobal = sensibilidade;
         sensibilidadeConfigurada = true;
+      } else {
+        sensibilidadeConfigurada = false;
       }
       registrarEvento("parametrizacao_recebida", request.body);
       saveData();
@@ -360,6 +416,7 @@ HttpResponse handleRequest(const HttpRequest& request) {
   }
 
   if (request.method == "DELETE" && (request.path == "/parametrizar" || request.path == "/parametrizacao")) {
+    parametrizacao = "null";
     sensibilidadeConfigurada = false;
     registrarEvento("parametrizacao_removida", "null");
     saveData();
