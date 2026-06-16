@@ -107,3 +107,60 @@ A Central de Operação atua como camada de supervisão e segurança da operaç�
 14. `POST /config/registrador` — atualização da URL de notificação externa.
 15. `GET /logs` — leitura do buffer de logs em texto puro.
 16. `DELETE /logs` — limpeza do buffer de logs.
+
+---
+
+# Componente Central de Monitoramento
+
+Este documento descreve o componente **Central de Monitoramento** da Camada B (Plataforma), com foco em responsabilidades, funcionalidades e fluxo de operação.
+
+## Objetivo
+
+A Central de Monitoramento atua como middleware entre os monitores da camada de Biblioteca (C) e a Central de Operação da camada de Aplicação (A). Ela recebe amostras de monitoramento de forma síncrona, bufferiza, agrega e repassa à camada superior apenas as informações consideradas importantes, evitando sobrecarga com dados irrelevantes.
+
+## Responsabilidades
+
+1. Receber de forma síncrona amostras de monitoramento dos monitores da camada inferior (Monitor Jetson, Monitor Wemos, Monitor P4).
+2. Bufferizar as amostras recentes e agregar o último valor reportado por cada origem.
+3. Avaliar a importância de cada amostra recebida com base em regras predefinidas.
+4. Repassar à Central de Operação apenas as informações consideradas importantes.
+5. Manter e consolidar o estado atual da escultura (programa, posição, velocidade, status).
+6. Reter repasses enquanto o programa da escultura não for conhecido, evitando estados inválidos.
+
+## Funcionalidades implementadas
+
+1. API HTTP REST executando em C++17 sobre Jetson Orin Nano, porta 8091.
+2. Recebimento e bufferização de até 64 amostras recentes dos monitores.
+3. Agregação de amostras por origem (último valor registrado por monitor).
+4. Regra de importância: estímulos de segurança, anomalia sinalizada, status de falha (`erro`, `falha`, `pânico`), mudança de programa e velocidade acima do limiar configurado.
+5. Consolidação de estado: programa, posição (x, y, z), velocidade, status e timestamp.
+6. Repasse imediato à Central de Operação ao detectar amostra importante com programa já conhecido.
+7. Heartbeat periódico (padrão: 5 s) com envio à Central de Operação somente se houver mudança relevante no estado consolidado.
+8. Retenção de repasse enquanto o programa da escultura não for conhecido, evitando enviar `programa=0`.
+9. Configuração em tempo de execução da URL da Central de Operação.
+10. Parametrização do limiar de velocidade considerado alto.
+11. Buffer de logs temporário em memória exposto como texto puro via endpoint dedicado.
+
+## Fluxo de funcionamento
+
+1. Inicialização do servidor HTTP e registro de rotas REST.
+2. Criação de thread de background para heartbeat periódico e processamento da fila de repasse HTTP.
+3. Recebimento de amostras via `POST /monitoramento` com campos `origem`, `tipo` e `dados`.
+4. Bufferização e atualização da agregação por origem.
+5. Avaliação de importância da amostra antes da consolidação (para detectar mudanças de estado).
+6. Consolidação do estado com os campos presentes na amostra recebida.
+7. Agendamento de repasse imediato à Central de Operação se a amostra for importante e o programa já for conhecido.
+8. Thread de background executa o repasse HTTP pendente e verifica o heartbeat a cada 10 ms.
+9. No heartbeat, agenda repasse apenas se o estado consolidado mudou desde o último envio.
+
+## Endpoints da aplicação
+
+1. `GET /` — informações do servidor, estatísticas e listagem das rotas disponíveis.
+2. `POST /monitoramento` — recebe amostras dos monitores da camada C.
+3. `GET /agregado` — estado consolidado atual e último valor reportado por cada origem.
+4. `GET /buffer` — amostras recentes armazenadas no buffer.
+5. `GET /config` — leitura das configurações atuais (URL da Central de Operação, limiares, período de repasse).
+6. `POST /config/central-operacao` — atualização da URL de destino do repasse.
+7. `POST /config/limiares` — atualização do limiar de velocidade considerado alto.
+8. `GET /logs` — leitura do buffer de logs em texto puro.
+9. `DELETE /logs` — limpeza do buffer de logs.
