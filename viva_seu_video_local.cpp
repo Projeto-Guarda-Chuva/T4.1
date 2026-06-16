@@ -31,9 +31,10 @@ const int SOCKET_ERROR = -1;
 
 const int DEFAULT_PORT = 8190;
 const long MAX_VIDEO_BYTES = 200L * 1024L * 1024L;
+const char* DEFAULT_VIDEO_DEPLOY_URL = "http://147.15.32.14/api/videos";
 
 bool running = true;
-std::string destinoExterno;
+std::string destinoExterno = DEFAULT_VIDEO_DEPLOY_URL;
 
 struct HttpRequest {
   std::string method;
@@ -152,15 +153,18 @@ ForwardResult encaminharVideo(const HttpRequest& request) {
   }
 
   struct curl_slist* headers = nullptr;
-  std::string contentTypeHeader = "Content-Type: " + contentType;
-  headers = curl_slist_append(headers, contentTypeHeader.c_str());
   headers = curl_slist_append(headers, "Expect:");
+
+  curl_mime* form = curl_mime_init(curl);
+  curl_mimepart* videoPart = curl_mime_addpart(form);
+  curl_mime_name(videoPart, "video");
+  curl_mime_filename(videoPart, "video.mp4");
+  curl_mime_type(videoPart, contentType.c_str());
+  curl_mime_data(videoPart, request.body.data(), request.body.size());
 
   curl_easy_setopt(curl, CURLOPT_URL, destinoExterno.c_str());
   curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-  curl_easy_setopt(curl, CURLOPT_POST, 1L);
-  curl_easy_setopt(curl, CURLOPT_POSTFIELDS, request.body.data());
-  curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE_LARGE, static_cast<curl_off_t>(request.body.size()));
+  curl_easy_setopt(curl, CURLOPT_MIMEPOST, form);
   curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curlWrite);
   curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resposta);
   curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
@@ -173,6 +177,7 @@ ForwardResult encaminharVideo(const HttpRequest& request) {
   curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
 
   curl_slist_free_all(headers);
+  curl_mime_free(form);
   curl_easy_cleanup(curl);
 
   if (code != CURLE_OK) {
@@ -378,7 +383,10 @@ int main(int argc, char* argv[]) {
       HttpRequest request = parseRequest(raw);
       std::cout << "[HTTP] " << request.method << " " << request.path
                 << " (" << request.body.size() << " bytes)\n";
-      sendResponse(client, handleRequest(request));
+      HttpResponse response = handleRequest(request);
+      std::cout << "[Resposta] status=" << response.status
+                << " body=" << response.body << "\n";
+      sendResponse(client, response);
     }
 
     closeSocket(client);
