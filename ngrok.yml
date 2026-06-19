@@ -1,0 +1,18 @@
+version: "2"
+tunnels:
+  central-operacao:
+    proto: http
+    addr: 8080
+  atuador-central:
+    proto: http
+    addr: 8090
+  central-monitoramento:
+    proto: http
+    addr: 8091
+  programador-atuacao:
+    proto: http
+    addr: 8180
+  viva-seu-video:
+    proto: http
+    addr: 8190
+
