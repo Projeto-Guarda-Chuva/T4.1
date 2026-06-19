@@ -164,3 +164,51 @@ A Central de Monitoramento atua como middleware entre os monitores da camada de 
 7. `POST /config/limiares` — atualização do limiar de velocidade considerado alto.
 8. `GET /logs` — leitura do buffer de logs em texto puro.
 9. `DELETE /logs` — limpeza do buffer de logs.
+
+---
+
+# Componente Atuador Central
+
+Este documento descreve o componente **Atuador Central** da Camada B (Plataforma), responsável por oferecer uma interface centralizada de comando dos atuadores da camada inferior (C - Biblioteca).
+
+## Objetivo
+
+O Atuador Central atua como *middleware* entre a camada de Aplicação (A) e a camada de Biblioteca (C). Ele recebe programações da camada superior, gerencia uma fila de execução com prioridades e traduz cada movimento em uma "linguagem básica de comando" enviada aos atuadores da camada inferior.
+
+## Responsabilidades
+
+1. Oferecer uma interface centralizada para comando dos atuadores.
+2. Ser acionado pelo **Programador de atuação** (para realizar uma programação) ou pela **Central de operação** (para parada segura em caso de risco).
+3. Aceitar programação **completa** (planejada do início ao fim) ou **parcial**.
+4. Receber novas programações a qualquer momento, respeitando a prioridade na fila: executar **imediatamente**, como **próximo** movimento, ou **após** a fila.
+5. Comandar os atuadores da camada C por meio de uma linguagem básica unificada.
+
+## Integração com as demais camadas
+
+1. **Camada superior (A - Aplicação):**
+   - `Programador de atuação` → `POST /programar` (ou `POST /atuador`, compatível com o payload `{comando, detalhes}` já enviado por ele).
+   - `Central de operação` → `POST /parada-segura` para interromper a execução em caso de risco.
+2. **Camada inferior (C - Biblioteca):** envia a cada atuador (`motor_movel`, `motor_fixo`, `iluminacao`, `audio`, `grafico`, `ptz`) um comando no formato `{ "atuador", "acao", "parametros", "duracao_ms" }`. Sem URL configurada, opera em modo simulação (apenas log).
+
+## Funcionalidades implementadas
+
+1. Fila de programação com prioridades (imediata / próxima / fim de fila).
+2. Interrupção e substituição da programação atual por uma programação imediata.
+3. Execução sequencial dos movimentos de cada programação por uma thread dedicada (equivalente ao `loop()`).
+4. Tradução de movimentos para a linguagem básica de comando dos atuadores via HTTP.
+5. Parada segura acionada pela Central de operação, com limpeza da fila e comando de segurança a todos os atuadores.
+6. Configuração em tempo de execução das URLs dos atuadores da camada C.
+7. Buffer de logs temporário em RAM, exposto como txt.
+
+## Endpoints da aplicação
+
+1. `GET /` — informações do serviço e listagem das rotas.
+2. `GET /estado` — programação atual, fila e estatísticas.
+3. `GET /fila` — itens da fila de programação.
+4. `POST /programar` — recebe uma programação (com prioridade) do Programador de atuação.
+5. `POST /atuador` — compatibilidade com o payload `{comando, detalhes}` atual do Programador de atuação.
+6. `POST /parada-segura` — parada segura acionada pela Central de operação.
+7. `POST /retomar` — libera o atuador após a parada segura.
+8. `GET /config/atuadores` — URLs configuradas dos atuadores da camada C.
+9. `POST /config/atuadores` — define a URL HTTP de cada atuador da camada C.
+10. `GET /logs` / `DELETE /logs` — leitura e limpeza do buffer de logs.
