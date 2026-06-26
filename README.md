@@ -11,7 +11,7 @@ Este documento define as boas práticas para organização e colaboração no re
 
 ---
 
-## 🧾 Commits
+## 🧾 Commits 
 
 ### ✅ Diretrizes Gerais
 - Todo commit deve conter:
