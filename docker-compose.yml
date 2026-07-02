@@ -1,0 +1,125 @@
+version: "3.9"
+
+# =============================================================
+#  T4.1 — Docker Compose
+#  Jetson Orin Nano (aarch64, JetPack R36 / Ubuntu 22.04)
+#
+#  Uso:
+#    docker compose up --build        # compila + sobe tudo
+#    docker compose up --build -d     # em background
+#    docker compose logs -f           # acompanha logs
+#    docker compose down              # derruba tudo
+#    docker compose up --build -d central-monitoramento  # so um servico
+# =============================================================
+
+services:
+
+  central-operacao:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args:
+        APP_SRC: central_de_operacao.cpp
+        KIND: httplib
+    image: t4.1/central-operacao
+    container_name: central-operacao
+    ports:
+      - "8080:8080"
+    networks:
+      - t4net
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "3"
+
+  atuador-central:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args:
+        APP_SRC: atuador_central.cpp
+        KIND: httplib
+    image: t4.1/atuador-central
+    container_name: atuador-central
+    ports:
+      - "8090:8090"
+    networks:
+      - t4net
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "3"
+
+  central-monitoramento:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args:
+        APP_SRC: central_de_monitoramento.cpp
+        KIND: httplib
+    image: t4.1/central-monitoramento
+    container_name: central-monitoramento
+    command: ["8091", "/tmp/monitor.sock"]
+    ports:
+      - "8091:8091"
+    volumes:
+      - socket_vol:/tmp
+    networks:
+      - t4net
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "3"
+
+  programador-atuacao:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args:
+        APP_SRC: programador_de_atuacao_local.cpp
+        KIND: winsock
+    image: t4.1/programador-atuacao
+    container_name: programador-atuacao
+    ports:
+      - "8180:8180"
+    networks:
+      - t4net
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "3"
+
+  viva-seu-video:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args:
+        APP_SRC: viva_seu_video_local.cpp
+        KIND: curl
+    image: t4.1/viva-seu-video
+    container_name: viva-seu-video
+    ports:
+      - "8190:8190"
+    networks:
+      - t4net
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "3"
+
+volumes:
+  socket_vol:
+
+networks:
+  t4net:
+    driver: bridge
