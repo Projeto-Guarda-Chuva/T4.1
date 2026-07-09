@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <chrono>
 #include <csignal>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -19,6 +20,7 @@
 using SocketType = SOCKET;
 #else
 #include <arpa/inet.h>
+#include <netdb.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -44,6 +46,13 @@ bool sensibilidadeConfigurada = false;
 std::vector<std::string> programas;
 std::vector<std::string> eventos;
 Clock::time_point iniciadoEm = Clock::now();
+
+// Destino do comando de atuacao (Atuador central, camada B - Plataforma).
+// Spec camada A, item 1.a / 4: "repassando a programacao ao componente
+// Atuador na camada de Plataforma". Configuravel via env ATUADOR_CENTRAL_URL
+// (default = servico docker "atuador-central"). Endpoint /programar do
+// Atuador central espera { movimentos:[...], prioridade }.
+std::string atuadorCentralUrl = "http://atuador-central:8090/programar";
 
 struct HttpRequest {
   std::string method;
@@ -341,6 +350,140 @@ std::string findProgramaByAcao(const std::string& acaoDetectada) {
   return "";
 }
 
+// Cliente HTTP minimo (POST JSON). Retorna o status HTTP, ou -1 em falha de
+// conexao. Multiplataforma: winsock no Windows, POSIX no Linux/Docker.
+int httpPostJson(const std::string& host, int port, const std::string& path,
+                 const std::string& body, std::string* respOut = nullptr) {
+  struct addrinfo hints{};
+  hints.ai_family = AF_INET;
+  hints.ai_socktype = SOCK_STREAM;
+  struct addrinfo* res = nullptr;
+  std::string portStr = std::to_string(port);
+  if (getaddrinfo(host.c_str(), portStr.c_str(), &hints, &res) != 0 || !res) {
+    return -1;
+  }
+
+  SocketType sock = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+  if (sock == INVALID_SOCKET) {
+    freeaddrinfo(res);
+    return -1;
+  }
+
+  if (connect(sock, res->ai_addr, static_cast<int>(res->ai_addrlen)) == SOCKET_ERROR) {
+    closeSocket(sock);
+    freeaddrinfo(res);
+    return -1;
+  }
+  freeaddrinfo(res);
+
+  std::ostringstream req;
+  req << "POST " << path << " HTTP/1.1\r\n"
+      << "Host: " << host << "\r\n"
+      << "Content-Type: application/json\r\n"
+      << "Content-Length: " << body.size() << "\r\n"
+      << "Connection: close\r\n\r\n"
+      << body;
+  std::string data = req.str();
+  if (send(sock, data.c_str(), static_cast<int>(data.size()), 0) == SOCKET_ERROR) {
+    closeSocket(sock);
+    return -1;
+  }
+
+  std::string raw;
+  char buffer[2048];
+  int received;
+  while ((received = recv(sock, buffer, sizeof(buffer), 0)) > 0) {
+    raw.append(buffer, received);
+    if (raw.size() > 65536) break;
+  }
+  closeSocket(sock);
+
+  int status = -1;
+  size_t sp = raw.find(' ');
+  if (sp != std::string::npos) status = std::atoi(raw.c_str() + sp + 1);
+  if (respOut) {
+    size_t bodyStart = raw.find("\r\n\r\n");
+    *respOut = (bodyStart != std::string::npos) ? raw.substr(bodyStart + 4) : "";
+  }
+  return status;
+}
+
+bool parseUrl(const std::string& url, std::string& host, int& port, std::string& path) {
+  std::string s = url;
+  size_t scheme = s.find("://");
+  if (scheme != std::string::npos) s = s.substr(scheme + 3);
+  size_t slash = s.find('/');
+  std::string hostPort;
+  if (slash == std::string::npos) { hostPort = s; path = "/"; }
+  else { hostPort = s.substr(0, slash); path = s.substr(slash); }
+  size_t colon = hostPort.rfind(':');
+  if (colon != std::string::npos) {
+    host = hostPort.substr(0, colon);
+    try { port = std::stoi(hostPort.substr(colon + 1)); }
+    catch (...) { return false; }
+  } else {
+    host = hostPort;
+    port = 80;
+  }
+  return !host.empty();
+}
+
+// Traduz o programa encontrado numa programacao no formato do Atuador central
+// e a envia via POST /programar. Retorna um resumo JSON do disparo para
+// registro no evento e na resposta ao chamador (spec camada A, item 4:
+// "Encaminhar comandos de execucao para o atuador").
+std::string dispararProgramacao(const std::string& programa, const std::string& acaoDetectada) {
+  // Usa "movimentos" do programa se existir; senao deriva um unico movimento
+  // a partir de atuador / movimento / velocidade.
+  std::string movimentos = extractJsonValue(programa, "movimentos");
+  if (movimentos.empty() || movimentos == "null") {
+    std::string atuador = "motor_movel";
+    extractString(programa, "atuador", atuador);
+    std::string movimento = "mover";
+    extractString(programa, "movimento", movimento);
+    double velocidade = 0;
+    bool temVel = extractNumber(programa, "velocidade", velocidade);
+    double duracao = 1000;
+    extractNumber(programa, "duracao_ms", duracao);
+
+    std::ostringstream mv;
+    mv << "[{\"atuador\":\"" << jsonEscape(atuador)
+       << "\",\"acao\":\"" << jsonEscape(movimento)
+       << "\",\"parametros\":{";
+    if (temVel) mv << "\"velocidade\":" << velocidade;
+    mv << "},\"duracao_ms\":" << static_cast<long>(duracao) << "}]";
+    movimentos = mv.str();
+  }
+
+  std::string prioridade = "fila";
+  extractString(programa, "prioridade", prioridade);
+
+  std::ostringstream payload;
+  payload << "{\"id\":\"PRG_" << jsonEscape(acaoDetectada) << "\""
+          << ",\"origem\":\"programador_de_atuacao\""
+          << ",\"completa\":true"
+          << ",\"prioridade\":\"" << jsonEscape(prioridade) << "\""
+          << ",\"movimentos\":" << movimentos << "}";
+
+  std::string host, path;
+  int port = 8090;
+  if (!parseUrl(atuadorCentralUrl, host, port, path)) {
+    std::cout << "[HTTP->Atuador] URL invalida: " << atuadorCentralUrl << "\n";
+    return "{\"enviado\":false,\"motivo\":\"url_invalida\"}";
+  }
+
+  std::string resposta;
+  int status = httpPostJson(host, port, path, payload.str(), &resposta);
+  std::cout << "[HTTP->Atuador] POST " << atuadorCentralUrl << " -> " << status << "\n";
+
+  std::ostringstream resumo;
+  resumo << "{\"enviado\":" << ((status >= 200 && status < 300) ? "true" : "false")
+         << ",\"status\":" << status
+         << ",\"url\":\"" << jsonEscape(atuadorCentralUrl) << "\""
+         << ",\"programacao\":" << payload.str() << "}";
+  return resumo.str();
+}
+
 // Nucleo do processamento de estimulo ({"acao_detectada", "intensidade"}).
 // Usado por POST /processar-estimulo (payload ja no formato de estimulo) e
 // por POST /gesture_update (descoberta do Processador de imagem traduzida).
@@ -367,10 +510,13 @@ HttpResponse processarEstimulo(const std::string& body) {
     return {404, "{\"erro\":\"Acao nao mapeada localmente\",\"estimulo\":" + body + "}"};
   }
 
-  std::string eventoPayload = "{\"estimulo\":" + body + ",\"programa\":" + programa + ",\"disparos\":[]}";
+  // Encaminha a programacao ao Atuador central (camada B).
+  std::string disparo = dispararProgramacao(programa, acaoDetectada);
+
+  std::string eventoPayload = "{\"estimulo\":" + body + ",\"programa\":" + programa + ",\"disparo\":" + disparo + "}";
   registrarEvento("estimulo_processado", eventoPayload);
   saveData();
-  return {200, "{\"mensagem\":\"Estimulo processado\",\"programa\":" + programa + ",\"disparos\":[]}"};
+  return {200, "{\"mensagem\":\"Estimulo processado\",\"programa\":" + programa + ",\"disparo\":" + disparo + "}"};
 }
 
 HttpResponse handleRequest(const HttpRequest& request) {
@@ -421,54 +567,33 @@ HttpResponse handleRequest(const HttpRequest& request) {
     }
 
     // Descobertas do Processador de imagem (camada B), no formato publicado
-    // pelo pipeline de visao (YOLO na webcam):
-    //   { "timestamp": 1720375934.5,
-    //     "state": { "gesture": "WAVE", "confidence": 0.92,
-    //                "speed": 1.4, "count": 3 } | null }
+    // pelo pipeline de visao (YOLO na webcam) — objeto plano:
+    //   { "gesture": "UP", "confidence": 0.33, "speed": 1.0, "count": 1 }
     // A descoberta e traduzida para o formato de estimulo
     // (gesture -> acao_detectada, confidence -> intensidade) e segue o
     // mesmo fluxo de processamento do /processar-estimulo.
     if (request.path == "/gesture_update") {
-      double timestampEpoch = 0;
-      if (!extractNumber(request.body, "timestamp", timestampEpoch)) {
-        return {400, "{\"erro\":\"Campo timestamp obrigatorio\"}"};
-      }
-
-      std::string stateJson = extractJsonValue(request.body, "state");
-      if (stateJson.empty()) {
-        return {400, "{\"erro\":\"Campo state obrigatorio (objeto ou null)\"}"};
-      }
-
-      // "state" nulo: detector ainda nao publicou estado — aceita sem processar
-      if (stateJson == "null") {
-        registrarEvento("gesto_sem_state", request.body);
-        saveData();
-        return {200, "{\"mensagem\":\"Aceito\",\"motivo\":\"state nulo, nada a processar\"}"};
-      }
-
       std::string gesto;
-      if (!extractString(stateJson, "gesture", gesto)) {
+      if (!extractString(request.body, "gesture", gesto)) {
         registrarEvento("gesto_invalido", request.body);
         saveData();
-        return {400, "{\"erro\":\"Campo state.gesture obrigatorio\"}"};
+        return {400, "{\"erro\":\"Campo gesture obrigatorio\"}"};
       }
 
       // Gesto de repouso (padrao do detector) = ausencia de descoberta
       if (gesto == "REST") {
-        registrarEvento("gesto_repouso_ignorado", stateJson);
+        registrarEvento("gesto_repouso_ignorado", request.body);
         saveData();
         return {200, "{\"mensagem\":\"Gesto de repouso ignorado\"}"};
       }
 
       double confianca = 0;
-      bool temConfianca = extractNumber(stateJson, "confidence", confianca);
+      bool temConfianca = extractNumber(request.body, "confidence", confianca);
 
       std::ostringstream estimulo;
       estimulo << "{\"acao_detectada\":\"" << jsonEscape(gesto) << "\"";
       if (temConfianca) estimulo << ",\"intensidade\":" << confianca;
-      estimulo << ",\"origem\":\"processador_imagem\""
-               << ",\"timestamp\":" << std::fixed << std::setprecision(3)
-               << timestampEpoch << "}";
+      estimulo << ",\"origem\":\"processador_imagem\"}";
       return processarEstimulo(estimulo.str());
     }
 
@@ -603,6 +728,13 @@ void sendResponse(SocketType client, const HttpResponse& response) {
 
 int main() {
   signal(SIGINT, onSignal);
+
+  // Destino do Atuador central via env (docker-compose); default = servico
+  // "atuador-central". Permite trocar o alvo sem recompilar.
+  if (const char* e = std::getenv("ATUADOR_CENTRAL_URL")) {
+    atuadorCentralUrl = e;
+  }
+  std::cout << "[Config] Atuador central em " << atuadorCentralUrl << "\n";
 
   if (!initSockets()) {
     std::cerr << "[Erro] Falha ao iniciar sockets\n";

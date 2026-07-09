@@ -48,6 +48,7 @@
 # include <winsock2.h>
 #endif
 #include <cstring>
+#include "strlcpy_compat.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -593,6 +594,15 @@ int main() {
     std::printf("\n");
     std::printf("=== CENTRAL DE MONITORAMENTO (Camada B - Plataforma) ===\n");
     log_append("Sistema iniciando");
+
+    /* Bootstrap do destino do repasse (Central de operacao, camada A) via
+       variavel de ambiente (docker-compose). Pode ser sobrescrito em runtime
+       por POST /config/central-operacao. */
+    if (const char* e = std::getenv("CENTRAL_OPERACAO_URL")) {
+        strlcpy(g_central_op_url, e, sizeof(g_central_op_url));
+        std::printf("[CONFIG] central_op_url='%s'\n", g_central_op_url);
+        log_append("[CONFIG] central_op_url=%s", g_central_op_url);
+    }
 
     registrar_rotas();
 
