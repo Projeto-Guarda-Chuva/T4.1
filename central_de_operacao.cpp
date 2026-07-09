@@ -10,6 +10,10 @@
  *   5. Notifica registrador externo (POST HTTP)
  *   6. 5 estados padrao + 1 aleatorio
  *   7. Logs em buffer txt temporario (acessivel via GET /logs)
+ *   8. Recebe do Processador de imagem o resultado do reconhecimento
+ *      de gestos via POST /gesture_update
+ *      { "timestamp": <epoch>, "state": {gesture, confidence,
+ *        speed, count} | null }
  *
  *  HTTP: porta 8080  (ajuste HTTP_PORT)
  *
@@ -117,6 +121,19 @@ struct EstadoEscultura {
     bool          valido     = false;
 };
 
+/* Ultimo resultado do reconhecimento de gestos recebido do
+   Processador de imagem (camada B), que repassa o estado publicado
+   pelo pipeline de visao (YOLO na webcam). */
+struct GestoDetectado {
+    char          gesture[32] = {};
+    double        confidence  = 0.0;
+    double        speed       = 0.0;
+    long          count       = 0;
+    double        timestamp   = 0.0;   /* epoch (s) enviado pelo detector */
+    unsigned long recebidoEm  = 0;
+    bool          valido      = false;
+};
+
 struct EventoJornada {
     unsigned long ts         = 0;
     float         posX = 0, posY = 0, posZ = 0;
@@ -163,6 +180,9 @@ static Jornada         g_jornadas[MAX_JORNADAS] = {};
 static int             g_num_jornadas    = 0;
 static int             g_jornada_idx     = -1;
 static unsigned long   g_ultimo_update   = 0;
+
+static GestoDetectado  g_gesto           = {};
+static unsigned long   g_gestos_recebidos = 0;
 
 static bool            g_emergencia      = false;
 static char            g_emerg_motivo[96]= {};
@@ -544,6 +564,8 @@ static void registrar_rotas() {
         doc["rotas"] = json::array({
             "GET    /estado",
             "POST   /estado",
+            "POST   /gesture_update    (Processador de imagem)",
+            "GET    /gesto",
             "GET    /estado/presets",
             "POST   /estado/preset?id=N        (1..5)",
             "POST   /estado/aleatorio",
@@ -626,6 +648,85 @@ static void registrar_rotas() {
         resp["status"]     = g_estado.status;
         resp["velocidade"] = g_estado.velocidade;
         enviar_json(res, 200, resp);
+    });
+
+    /* ─── POST /gesture_update ───────────────────────────── *
+     * Dados de monitoramento enviados pelo Processador de imagem
+     * (camada B), com o resultado do reconhecimento de gestos.
+     * Body:
+     *   { "timestamp": 1720375934.5,
+     *     "state": { "gesture":    "REST",
+     *                "confidence": 1.0,
+     *                "speed":      0.0,
+     *                "count":      0 } | null }
+     * ("state" pode ser null enquanto o detector nao publicou estado;
+     *  campos extras sao ignorados)
+     */
+    g_server.Post("/gesture_update", [](const httplib::Request& req,
+                                        httplib::Response& res) {
+        std::printf("[HTTP] POST /gesture_update\n");
+        json body;
+        try { body = json::parse(req.body); }
+        catch (...) { enviar_erro(res, 400, "JSON invalido"); return; }
+
+        if (!body.contains("timestamp") || !body["timestamp"].is_number()) {
+            enviar_erro(res, 400, "campo timestamp obrigatorio"); return;
+        }
+
+        std::lock_guard<std::recursive_mutex> lk(g_mutex);
+        g_gestos_recebidos++;
+
+        if (!body.contains("state") || body["state"].is_null()) {
+            log_append("[GESTO] payload sem state (detector iniciando)");
+            json resp;
+            resp["aceito"] = true;
+            resp["motivo"] = "state nulo, nada a processar";
+            enviar_json(res, 200, resp);
+            return;
+        }
+        const json& st = body["state"];
+        if (!st.is_object()) {
+            enviar_erro(res, 400, "state deve ser objeto ou null"); return;
+        }
+
+        strlcpy(g_gesto.gesture,
+                st.value("gesture", std::string("REST")).c_str(),
+                sizeof(g_gesto.gesture));
+        g_gesto.confidence = st.value("confidence", 0.0);
+        g_gesto.speed      = st.value("speed",      0.0);
+        g_gesto.count      = (long)st.value("count", 0);
+        g_gesto.timestamp  = body.value("timestamp", 0.0);
+        g_gesto.recebidoEm = millis();
+        g_gesto.valido     = true;
+
+        std::printf("[GESTO] %s conf=%.2f speed=%.2f count=%ld\n",
+                    g_gesto.gesture, g_gesto.confidence,
+                    g_gesto.speed, g_gesto.count);
+        log_append("[GESTO] %s conf=%.2f speed=%.2f count=%ld",
+                   g_gesto.gesture, g_gesto.confidence,
+                   g_gesto.speed, g_gesto.count);
+
+        json resp;
+        resp["aceito"]     = true;
+        resp["gesto"]      = g_gesto.gesture;
+        resp["emergencia"] = g_emergencia;
+        enviar_json(res, 200, resp);
+    });
+
+    /* ─── GET /gesto ─────────────────────────────────────── */
+    g_server.Get("/gesto", [](const httplib::Request&, httplib::Response& res) {
+        std::printf("[HTTP] GET /gesto\n");
+        std::lock_guard<std::recursive_mutex> lk(g_mutex);
+        json doc;
+        doc["valido"]      = g_gesto.valido;
+        doc["gesture"]     = g_gesto.gesture;
+        doc["confidence"]  = g_gesto.confidence;
+        doc["speed"]       = g_gesto.speed;
+        doc["count"]       = g_gesto.count;
+        doc["timestamp"]   = g_gesto.timestamp;
+        doc["recebido_ms"] = g_gesto.recebidoEm;
+        doc["recebidos"]   = g_gestos_recebidos;
+        enviar_json(res, 200, doc);
     });
 
     /* ─── GET /estado/presets ────────────────────────────── */
