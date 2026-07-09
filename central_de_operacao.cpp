@@ -14,6 +14,9 @@
  *      de gestos via POST /gesture_update
  *      { "timestamp": <epoch>, "state": {gesture, confidence,
  *        speed, count} | null }
+ *   9. Recebe do Processador de audio o resultado do reconhecimento
+ *      de audio via POST /audioUpdate
+ *      { "type": "command", "payload": "abrir|foto|descer|parar" }
  *
  *  HTTP: porta 8080  (ajuste HTTP_PORT)
  *
@@ -134,6 +137,15 @@ struct GestoDetectado {
     bool          valido      = false;
 };
 
+/* Ultimo resultado do reconhecimento de audio recebido do
+   Processador de audio (camada B). */
+struct ComandoAudio {
+    char          tipo[24]    = {};
+    char          comando[32] = {};
+    unsigned long recebidoEm  = 0;
+    bool          valido      = false;
+};
+
 struct EventoJornada {
     unsigned long ts         = 0;
     float         posX = 0, posY = 0, posZ = 0;
@@ -183,6 +195,9 @@ static unsigned long   g_ultimo_update   = 0;
 
 static GestoDetectado  g_gesto           = {};
 static unsigned long   g_gestos_recebidos = 0;
+
+static ComandoAudio    g_audio            = {};
+static unsigned long   g_audios_recebidos = 0;
 
 static bool            g_emergencia      = false;
 static char            g_emerg_motivo[96]= {};
@@ -566,6 +581,8 @@ static void registrar_rotas() {
             "POST   /estado",
             "POST   /gesture_update    (Processador de imagem)",
             "GET    /gesto",
+            "POST   /audioUpdate      (Processador de audio)",
+            "GET    /audio",
             "GET    /estado/presets",
             "POST   /estado/preset?id=N        (1..5)",
             "POST   /estado/aleatorio",
@@ -726,6 +743,58 @@ static void registrar_rotas() {
         doc["timestamp"]   = g_gesto.timestamp;
         doc["recebido_ms"] = g_gesto.recebidoEm;
         doc["recebidos"]   = g_gestos_recebidos;
+        enviar_json(res, 200, doc);
+    });
+
+    /* ─── POST /audioUpdate ─────────────────────────────── *
+     * Dados de monitoramento enviados pelo Processador de audio
+     * (camada B), com o resultado do reconhecimento de audio.
+     * Body:
+     *   { "type": "command", "payload": "abrir" }
+     * (comandos conhecidos: abrir, foto, descer, parar)
+     */
+    g_server.Post("/audioUpdate", [](const httplib::Request& req,
+                                      httplib::Response& res) {
+        std::printf("[HTTP] POST /audioUpdate\n");
+        json body;
+        try { body = json::parse(req.body); }
+        catch (...) { enviar_erro(res, 400, "JSON invalido"); return; }
+
+        if (!body.contains("payload") || !body["payload"].is_string() ||
+            body["payload"].get<std::string>().empty()) {
+            enviar_erro(res, 400, "campo payload obrigatorio"); return;
+        }
+        std::string tipo    = body.value("type",    std::string("command"));
+        std::string comando = body.value("payload", std::string(""));
+
+        std::lock_guard<std::recursive_mutex> lk(g_mutex);
+        g_audios_recebidos++;
+
+        strlcpy(g_audio.tipo,    tipo.c_str(),    sizeof(g_audio.tipo));
+        strlcpy(g_audio.comando, comando.c_str(), sizeof(g_audio.comando));
+        g_audio.recebidoEm = millis();
+        g_audio.valido     = true;
+
+        std::printf("[AUDIO] %s type=%s\n", g_audio.comando, g_audio.tipo);
+        log_append("[AUDIO] %s type=%s", g_audio.comando, g_audio.tipo);
+
+        json resp;
+        resp["aceito"]     = true;
+        resp["comando"]    = g_audio.comando;
+        resp["emergencia"] = g_emergencia;
+        enviar_json(res, 200, resp);
+    });
+
+    /* ─── GET /audio ─────────────────────────────────────── */
+    g_server.Get("/audio", [](const httplib::Request&, httplib::Response& res) {
+        std::printf("[HTTP] GET /audio\n");
+        std::lock_guard<std::recursive_mutex> lk(g_mutex);
+        json doc;
+        doc["valido"]      = g_audio.valido;
+        doc["type"]        = g_audio.tipo;
+        doc["payload"]     = g_audio.comando;
+        doc["recebido_ms"] = g_audio.recebidoEm;
+        doc["recebidos"]   = g_audios_recebidos;
         enviar_json(res, 200, doc);
     });
 
