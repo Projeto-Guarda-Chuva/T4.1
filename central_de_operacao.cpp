@@ -205,6 +205,10 @@ static unsigned long   g_emerg_ts        = 0;
 
 static char            g_registrador_url[128] = {};
 
+/* URL do Atuador central (camada B). Acionado em parada segura para
+   interromper a execucao dos atuadores (spec camada A, item 2.c). */
+static char            g_atuador_url[128] = {};
+
 /* ─── Log buffer (txt temporario em RAM) ─────────────────── */
 static char   g_log_buf[LOG_BUFFER_SIZE + 1] = {};
 static size_t g_log_len                       = 0;
@@ -228,6 +232,7 @@ static void        log_append(const char* fmt, ...);
 static void        verificar_timeout();
 static void        enfileirar_notificacao(const char* tipo, const json& payload);
 static void        processar_notificacao_pendente();
+static void        notificar_parada_atuador(const char* motivo);
 static const char* detectar_anomalia(const EstadoEscultura& novo,
                                      const EstadoEscultura& ant);
 static void        disparar_emergencia(const char* motivo);
@@ -369,6 +374,9 @@ static void disparar_emergencia(const char* motivo) {
     payload["posicao"]["y"] = g_estado.posY;
     payload["posicao"]["z"] = g_estado.posZ;
     enfileirar_notificacao("PARADA_EMERGENCIA", payload);
+
+    /* Comanda o Atuador central a interromper com seguranca (camada B). */
+    notificar_parada_atuador(motivo);
 
     if (g_jornada_idx >= 0 && !g_jornadas[g_jornada_idx].encerrada) {
         g_jornadas[g_jornada_idx].fim       = millis();
@@ -547,6 +555,41 @@ static void processar_notificacao_pendente() {
     }
 }
 
+/* Aciona o Atuador central (camada B) para PARADA SEGURA.
+   Dispara um POST /parada-segura em thread destacada para nao bloquear
+   o fluxo de emergencia (que roda sob g_mutex). */
+static void notificar_parada_atuador(const char* motivo) {
+    std::string url = g_atuador_url;   /* chamado sob g_mutex (recursivo) */
+    if (url.empty()) {
+        std::printf("[ATUADOR] parada-segura ignorada (URL nao configurada)\n");
+        log_append("[ATUADOR] parada-segura sem URL configurada");
+        return;
+    }
+
+    json body;
+    body["motivo"] = motivo;
+    body["origem"] = "central_operacao";
+    std::string payload = body.dump();
+
+    std::thread([url, payload]() {
+        std::string host, path;
+        int port = 80;
+        if (!parse_url(url.c_str(), host, port, path)) {
+            std::printf("[ATUADOR] URL invalida: %s\n", url.c_str());
+            return;
+        }
+        httplib::Client cli(host, port);
+        cli.set_connection_timeout(HTTP_NOTIF_TIMEOUT, 0);
+        cli.set_read_timeout(HTTP_NOTIF_TIMEOUT, 0);
+        auto res = cli.Post(path, payload, "application/json");
+        if (res)
+            std::printf("[ATUADOR] parada-segura -> HTTP %d\n", res->status);
+        else
+            std::printf("[ATUADOR] erro ao comandar parada-segura: %s\n",
+                        httplib::to_string(res.error()).c_str());
+    }).detach();
+}
+
 /* ════════════════════════════════════════════════════════════
    TIMEOUT
    ════════════════════════════════════════════════════════════ */
@@ -594,6 +637,7 @@ static void registrar_rotas() {
             "POST   /emergencia/reset",
             "GET    /config",
             "POST   /config/registrador",
+            "POST   /config/atuador    (Atuador central p/ parada segura)",
             "GET    /logs            (txt temporario)",
             "DELETE /logs            (limpa buffer)"
         });
@@ -670,14 +714,12 @@ static void registrar_rotas() {
     /* ─── POST /gesture_update ───────────────────────────── *
      * Dados de monitoramento enviados pelo Processador de imagem
      * (camada B), com o resultado do reconhecimento de gestos.
-     * Body:
-     *   { "timestamp": 1720375934.5,
-     *     "state": { "gesture":    "REST",
-     *                "confidence": 1.0,
-     *                "speed":      0.0,
-     *                "count":      0 } | null }
-     * ("state" pode ser null enquanto o detector nao publicou estado;
-     *  campos extras sao ignorados)
+     * Body (objeto plano):
+     *   { "gesture":    "UP",
+     *     "confidence": 0.33,
+     *     "speed":      1.0,
+     *     "count":      1 }
+     * (campos extras sao ignorados)
      */
     g_server.Post("/gesture_update", [](const httplib::Request& req,
                                         httplib::Response& res) {
@@ -686,33 +728,20 @@ static void registrar_rotas() {
         try { body = json::parse(req.body); }
         catch (...) { enviar_erro(res, 400, "JSON invalido"); return; }
 
-        if (!body.contains("timestamp") || !body["timestamp"].is_number()) {
-            enviar_erro(res, 400, "campo timestamp obrigatorio"); return;
+        if (!body.contains("gesture") || !body["gesture"].is_string()) {
+            enviar_erro(res, 400, "campo gesture obrigatorio"); return;
         }
 
         std::lock_guard<std::recursive_mutex> lk(g_mutex);
         g_gestos_recebidos++;
 
-        if (!body.contains("state") || body["state"].is_null()) {
-            log_append("[GESTO] payload sem state (detector iniciando)");
-            json resp;
-            resp["aceito"] = true;
-            resp["motivo"] = "state nulo, nada a processar";
-            enviar_json(res, 200, resp);
-            return;
-        }
-        const json& st = body["state"];
-        if (!st.is_object()) {
-            enviar_erro(res, 400, "state deve ser objeto ou null"); return;
-        }
-
         strlcpy(g_gesto.gesture,
-                st.value("gesture", std::string("REST")).c_str(),
+                body.value("gesture", std::string("REST")).c_str(),
                 sizeof(g_gesto.gesture));
-        g_gesto.confidence = st.value("confidence", 0.0);
-        g_gesto.speed      = st.value("speed",      0.0);
-        g_gesto.count      = (long)st.value("count", 0);
-        g_gesto.timestamp  = body.value("timestamp", 0.0);
+        g_gesto.confidence = body.value("confidence", 0.0);
+        g_gesto.speed      = body.value("speed",      0.0);
+        g_gesto.count      = (long)body.value("count", 0);
+        g_gesto.timestamp  = 0.0;
         g_gesto.recebidoEm = millis();
         g_gesto.valido     = true;
 
@@ -1079,6 +1108,7 @@ static void registrar_rotas() {
         std::lock_guard<std::recursive_mutex> lk(g_mutex);
         json doc;
         doc["registrador_url"]             = g_registrador_url;
+        doc["atuador_url"]                 = g_atuador_url;
         doc["limites"]["velocidade_max"]   = g_lim.velocidade_max;
         doc["limites"]["delta_pos_max"]    = g_lim.delta_pos_max;
         doc["limites"]["pos_min"]          = { g_lim.pos_min[0],
@@ -1111,6 +1141,29 @@ static void registrar_rotas() {
         json resp;
         resp["aceito"]          = true;
         resp["registrador_url"] = g_registrador_url;
+        enviar_json(res, 200, resp);
+    });
+
+    /* ─── POST /config/atuador ───────────────────────────── *
+     * Body: { "url": "http://atuador-central:8090/parada-segura" }
+     * Define o destino do comando de parada segura (camada B).
+     */
+    g_server.Post("/config/atuador", [](const httplib::Request& req,
+                                        httplib::Response& res) {
+        std::printf("[HTTP] POST /config/atuador\n");
+        json body;
+        try { body = json::parse(req.body); }
+        catch (...) { enviar_erro(res, 400, "JSON invalido"); return; }
+        std::string url = body.value("url", std::string(""));
+
+        std::lock_guard<std::recursive_mutex> lk(g_mutex);
+        strlcpy(g_atuador_url, url.c_str(), sizeof(g_atuador_url));
+        std::printf("[CONFIG] atuador_url='%s'\n", g_atuador_url);
+        log_append("[CONFIG] atuador_url=%s", g_atuador_url);
+
+        json resp;
+        resp["aceito"]      = true;
+        resp["atuador_url"] = g_atuador_url;
         enviar_json(res, 200, resp);
     });
 
@@ -1153,6 +1206,16 @@ int main() {
     std::printf("\n");
     std::printf("=== CENTRAL DE OPERACAO (REST — cpp-httplib) ===\n");
     log_append("Sistema iniciando");
+
+    /* Bootstrap das URLs de integracao via variaveis de ambiente
+       (definidas no docker-compose). Podem ser sobrescritas em runtime
+       pelos endpoints POST /config/registrador e POST /config/atuador. */
+    if (const char* e = std::getenv("REGISTRADOR_URL"))
+        strlcpy(g_registrador_url, e, sizeof(g_registrador_url));
+    if (const char* e = std::getenv("ATUADOR_CENTRAL_URL"))
+        strlcpy(g_atuador_url, e, sizeof(g_atuador_url));
+    std::printf("[CONFIG] registrador_url='%s'\n", g_registrador_url);
+    std::printf("[CONFIG] atuador_url='%s'\n", g_atuador_url);
 
     registrar_rotas();
 
