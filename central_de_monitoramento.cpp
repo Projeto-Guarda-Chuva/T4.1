@@ -46,7 +46,8 @@
 # define WIN32_LEAN_AND_MEAN
 # endif
 # include <winsock2.h>
-# include <cstring>
+#endif
+#include <cstring>
 static size_t strlcpy(char* dst, const char* src, size_t size) {
     if (!size) return std::strlen(src);
     size_t i = 0;
@@ -54,7 +55,6 @@ static size_t strlcpy(char* dst, const char* src, size_t size) {
     dst[i] = '\0';
     return std::strlen(src);
 }
-#endif
 
 #include <cstdio>
 #include <cstdlib>
@@ -411,10 +411,11 @@ static void registrar_rotas() {
 
     /* ─── POST /monitoramento ────────────────────────────── *
      * Interface principal com os monitores da camada inferior.
-     * Body:
-     *   { "origem": "monitor_jetson|monitor_wemos|monitor_p4",
-     *     "tipo":   "estado|sistema|rede|seguranca",
-     *     "dados":  { ... } }
+     * Body (formato Monitor Jetson/Wemos/P4):
+     *   { "timestamp": "...", "device": "...",
+     *     "component": "monitor_jetson|monitor_wemos|monitor_p4",
+     *     "type":      "event|telemetry",
+     *     "data":      { ... } }
      */
     g_server.Post("/monitoramento", [](const httplib::Request& req,
                                        httplib::Response& res) {
@@ -424,9 +425,9 @@ static void registrar_rotas() {
         catch (...) { enviar_erro(res, 400, "JSON invalido"); return; }
 
         Amostra a;
-        a.origem      = body.value("origem", std::string("desconhecida"));
-        a.tipo        = body.value("tipo",   std::string("estado"));
-        a.dados       = body.contains("dados") ? body["dados"] : json::object();
+        a.origem      = body.value("component", std::string("desconhecida"));
+        a.tipo        = body.value("type",      std::string("event"));
+        a.dados       = body.contains("data") ? body["data"] : json::object();
         a.recebida_em = millis();
 
         std::lock_guard<std::recursive_mutex> lk(g_mutex);
