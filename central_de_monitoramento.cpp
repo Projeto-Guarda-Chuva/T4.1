@@ -48,13 +48,6 @@
 # include <winsock2.h>
 #endif
 #include <cstring>
-static size_t strlcpy(char* dst, const char* src, size_t size) {
-    if (!size) return std::strlen(src);
-    size_t i = 0;
-    for (; i < size - 1 && src[i]; ++i) dst[i] = src[i];
-    dst[i] = '\0';
-    return std::strlen(src);
-}
 
 #include <cstdio>
 #include <cstdlib>
