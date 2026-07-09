@@ -3,3 +3,4 @@ deps/
 logs/
 __pycache__/
 ESP/
+dados/

@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <chrono>
 #include <csignal>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -29,7 +30,11 @@ const int SOCKET_ERROR = -1;
 
 using Clock = std::chrono::steady_clock;
 
-const std::string DATA_FILE = "ESP/programador_de_atuacao.dados.json";
+// Banco local de configuracao (especificacao camada A, item 1.b:
+// "Armazena as programacoes antigas e atuais no banco de dados de
+// configuracao"). A pasta e criada automaticamente na inicializacao.
+const std::string DATA_DIR  = "dados";
+const std::string DATA_FILE = "dados/programador_de_atuacao.dados.json";
 const int PORT = 8180;
 
 bool running = true;
@@ -336,6 +341,38 @@ std::string findProgramaByAcao(const std::string& acaoDetectada) {
   return "";
 }
 
+// Nucleo do processamento de estimulo ({"acao_detectada", "intensidade"}).
+// Usado por POST /processar-estimulo (payload ja no formato de estimulo) e
+// por POST /gesture_update (descoberta do Processador de imagem traduzida).
+HttpResponse processarEstimulo(const std::string& body) {
+  std::string acaoDetectada;
+  double intensidade = 0;
+
+  if (!extractString(body, "acao_detectada", acaoDetectada)) {
+    registrarEvento("estimulo_invalido", body);
+    saveData();
+    return {400, "{\"erro\":\"Campo acao_detectada obrigatorio\"}"};
+  }
+
+  if (sensibilidadeConfigurada && extractNumber(body, "intensidade", intensidade) && intensidade < sensibilidadeGlobal) {
+    registrarEvento("estimulo_ignorado", body);
+    saveData();
+    return {200, "{\"mensagem\":\"Estimulo ignorado\",\"motivo\":\"intensidade abaixo da sensibilidade\"}"};
+  }
+
+  std::string programa = findProgramaByAcao(acaoDetectada);
+  if (programa.empty()) {
+    registrarEvento("estimulo_sem_configuracao", body);
+    saveData();
+    return {404, "{\"erro\":\"Acao nao mapeada localmente\",\"estimulo\":" + body + "}"};
+  }
+
+  std::string eventoPayload = "{\"estimulo\":" + body + ",\"programa\":" + programa + ",\"disparos\":[]}";
+  registrarEvento("estimulo_processado", eventoPayload);
+  saveData();
+  return {200, "{\"mensagem\":\"Estimulo processado\",\"programa\":" + programa + ",\"disparos\":[]}"};
+}
+
 HttpResponse handleRequest(const HttpRequest& request) {
   if (request.method == "GET" && (request.path == "/" || request.path == "/health")) {
     return {200, statusJson()};
@@ -380,32 +417,59 @@ HttpResponse handleRequest(const HttpRequest& request) {
     }
 
     if (request.path == "/processar-estimulo") {
-      std::string acaoDetectada;
-      double intensidade = 0;
+      return processarEstimulo(request.body);
+    }
 
-      if (!extractString(request.body, "acao_detectada", acaoDetectada)) {
-        registrarEvento("estimulo_invalido", request.body);
-        saveData();
-        return {400, "{\"erro\":\"Campo acao_detectada obrigatorio\"}"};
+    // Descobertas do Processador de imagem (camada B), no formato publicado
+    // pelo pipeline de visao (YOLO na webcam):
+    //   { "timestamp": 1720375934.5,
+    //     "state": { "gesture": "WAVE", "confidence": 0.92,
+    //                "speed": 1.4, "count": 3 } | null }
+    // A descoberta e traduzida para o formato de estimulo
+    // (gesture -> acao_detectada, confidence -> intensidade) e segue o
+    // mesmo fluxo de processamento do /processar-estimulo.
+    if (request.path == "/gesture_update") {
+      double timestampEpoch = 0;
+      if (!extractNumber(request.body, "timestamp", timestampEpoch)) {
+        return {400, "{\"erro\":\"Campo timestamp obrigatorio\"}"};
       }
 
-      if (sensibilidadeConfigurada && extractNumber(request.body, "intensidade", intensidade) && intensidade < sensibilidadeGlobal) {
-        registrarEvento("estimulo_ignorado", request.body);
-        saveData();
-        return {200, "{\"mensagem\":\"Estimulo ignorado\",\"motivo\":\"intensidade abaixo da sensibilidade\"}"};
+      std::string stateJson = extractJsonValue(request.body, "state");
+      if (stateJson.empty()) {
+        return {400, "{\"erro\":\"Campo state obrigatorio (objeto ou null)\"}"};
       }
 
-      std::string programa = findProgramaByAcao(acaoDetectada);
-      if (programa.empty()) {
-        registrarEvento("estimulo_sem_configuracao", request.body);
+      // "state" nulo: detector ainda nao publicou estado — aceita sem processar
+      if (stateJson == "null") {
+        registrarEvento("gesto_sem_state", request.body);
         saveData();
-        return {404, "{\"erro\":\"Acao nao mapeada localmente\",\"estimulo\":" + request.body + "}"};
+        return {200, "{\"mensagem\":\"Aceito\",\"motivo\":\"state nulo, nada a processar\"}"};
       }
 
-      std::string eventoPayload = "{\"estimulo\":" + request.body + ",\"programa\":" + programa + ",\"disparos\":[]}";
-      registrarEvento("estimulo_processado", eventoPayload);
-      saveData();
-      return {200, "{\"mensagem\":\"Estimulo processado\",\"programa\":" + programa + ",\"disparos\":[]}"};
+      std::string gesto;
+      if (!extractString(stateJson, "gesture", gesto)) {
+        registrarEvento("gesto_invalido", request.body);
+        saveData();
+        return {400, "{\"erro\":\"Campo state.gesture obrigatorio\"}"};
+      }
+
+      // Gesto de repouso (padrao do detector) = ausencia de descoberta
+      if (gesto == "REST") {
+        registrarEvento("gesto_repouso_ignorado", stateJson);
+        saveData();
+        return {200, "{\"mensagem\":\"Gesto de repouso ignorado\"}"};
+      }
+
+      double confianca = 0;
+      bool temConfianca = extractNumber(stateJson, "confidence", confianca);
+
+      std::ostringstream estimulo;
+      estimulo << "{\"acao_detectada\":\"" << jsonEscape(gesto) << "\"";
+      if (temConfianca) estimulo << ",\"intensidade\":" << confianca;
+      estimulo << ",\"origem\":\"processador_imagem\""
+               << ",\"timestamp\":" << std::fixed << std::setprecision(3)
+               << timestampEpoch << "}";
+      return processarEstimulo(estimulo.str());
     }
 
     if (request.path == "/eventos" || request.path == "/logs") {
@@ -539,6 +603,16 @@ int main() {
     closeSocket(serverSocket);
     cleanupSockets();
     return 1;
+  }
+
+  // Garante o diretorio do banco de configuracao; sem ele a persistencia
+  // falharia em silencio (ofstream nao cria diretorios) e os programas
+  // cadastrados se perderiam a cada reinicio.
+  std::error_code dirErr;
+  std::filesystem::create_directories(DATA_DIR, dirErr);
+  if (dirErr) {
+    std::cerr << "[Aviso] Nao foi possivel criar '" << DATA_DIR
+              << "' (" << dirErr.message() << "); operando so em memoria\n";
   }
 
   loadData();
