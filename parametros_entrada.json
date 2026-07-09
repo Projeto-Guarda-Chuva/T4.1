@@ -1,0 +1,70 @@
+[
+    {
+        "funcionalidade": "SUCESSO: Verificar Saúde do Sistema",
+        "metodo": "GET",
+        "rota": "/",
+        "parametros": null,
+        "status_esperado": 200
+    },
+    {
+        "funcionalidade": "ERRO: Tentar aplicar um Preset que não existe (ID 99)",
+        "metodo": "POST",
+        "rota": "/estado/preset?id=99",
+        "parametros": null,
+        "status_esperado": 400
+    },
+    {
+        "funcionalidade": "ERRO: Enviar estado faltando campos obrigatórios (Sem Posição)",
+        "metodo": "POST",
+        "rota": "/estado",
+        "parametros": {
+            "programa": 1,
+            "velocidade": 50,
+            "status": "executando"
+        },
+        "status_esperado": 400
+    },
+    {
+        "funcionalidade": "SUCESSO: Processar Estado Normal (Seguro)",
+        "metodo": "POST",
+        "rota": "/estado",
+        "parametros": {
+            "programa": 1,
+            "velocidade": 50,
+            "posicao": {"x": 0.0, "y": 0.0, "z": 0.0},
+            "status": "executando"
+        },
+        "status_esperado": 200
+    },
+    {
+        "funcionalidade": "ERRO/ANOMALIA: Detectar Salto Brusco / Teletransporte",
+        "metodo": "POST",
+        "rota": "/estado",
+        "parametros": {
+            "programa": 1,
+            "velocidade": 50,
+            "posicao": {"x": 500.0, "y": 0.0, "z": 0.0},
+            "status": "executando"
+        },
+        "status_esperado": 503
+    },
+    {
+        "funcionalidade": "ERRO/BLOQUEIO: Tentar comandar enquanto está em Emergência",
+        "metodo": "POST",
+        "rota": "/estado",
+        "parametros": {
+            "programa": 1,
+            "velocidade": 10,
+            "posicao": {"x": 500.0, "y": 0.0, "z": 0.0},
+            "status": "executando"
+        },
+        "status_esperado": 503
+    },
+    {
+        "funcionalidade": "SUCESSO: Resetar Emergência (Retomar Operação)",
+        "metodo": "POST",
+        "rota": "/emergencia/reset",
+        "parametros": null,
+        "status_esperado": 200
+    }
+]

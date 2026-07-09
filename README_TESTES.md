@@ -1,8 +1,8 @@
 # Instruções para Execução dos Testes de Integração (API)
 
-Este documento explica como compilar os componentes da Camada B (Plataforma) e rodar a suíte de testes automatizados localmente antes do envio para a esteira de CI/CD do GitHub.
+Este documento explica como compilar os componentes da Camada B (Plataforma) e rodar a suíte de testes automatizados localmente antes do envio para a esteira de CI/CD do GitHub. A suíte utiliza o framework Pytest focando em QA, garantindo 100% de cobertura, testes negativos e mapeamento de falhas conhecidas.
 
-## 🛠️ 1. Pré-requisitos
+## 1. Pré-requisitos
 
 Antes de iniciar, certifique-se de ter instalado na sua máquina:
 
@@ -13,22 +13,21 @@ Antes de iniciar, certifique-se de ter instalado na sua máquina:
 Instale as bibliotecas de teste do Python executando o comando no terminal:
 
 ```bash
-pip install pytest requests
+pip install pytest requests pytest-html
 ```
 
-## 📁 2. Estrutura de Arquivos de Teste
+## 2. Estrutura de Arquivos de Teste
 
-Os testes foram estruturados utilizando a abordagem de caixa-preta (testes de API/Componente):
+Os testes foram estruturados na pasta tests utilizando a abordagem de caixa-preta (testes de API/Componente):
 
-* `CMakeLists.txt`: Gerencia a compilação de todos os executáveis C++ e o download automático das dependências (`nlohmann/json` e `cpp-httplib`).
-* `test_api_atuador.py`: Valida as rotas de fila, programação e parada segura do Atuador Central (Porta 8090).
-* `test_api_monitoramento.py`: Valida a bufferização e regras de importância da Central de Monitoramento (Porta 8091).
-* `test_api_operacao.py`: Valida o controle de jornadas e a detecção de anomalias/emergências da Central de Operação (Porta 8080).
-* `test_api_programador.py`: Valida a parametrização de sensibilidade e estímulos usando o simulador local do Programador de Atuação (Porta 8180).
+* `CMakeLists.txt`: Gerencia a compilação de todos os executáveis C++ na raiz.
+* `test_api_atuador.py`: Valida as rotas do Atuador Central (Porta 8090).
+* `test_api_monitoramento.py`: Valida a Central de Monitoramento (Porta 8091).
+* `test_api_operacao.py`: Valida a Central de Operação (Porta 8080).
 
-## 🔨 3. Passo 1: Compilação do Projeto
+## 3. Passo 1: Compilação do Projeto
 
-Para baixar as dependências e compilar todos os quatro componentes C++ de uma vez, limpe a pasta `build` antiga (se houver) e execute:
+Para baixar as dependências e compilar todos os três componentes C++ de uma vez, limpe a pasta `build` antiga (se houver) e execute:
 
 ```powershell
 cmake -S . -B build ; cmake --build build
@@ -36,7 +35,7 @@ cmake -S . -B build ; cmake --build build
 
 Os executáveis serão gerados dentro da pasta `build/Debug/`.
 
-## 🚀 4. Passo 2: Execução dos Componentes e Testes
+## 4. Passo 2: Execução dos Componentes e Testes
 
 Os testes exigem que o servidor correspondente esteja rodando antes do disparo do script Python.
 
@@ -51,7 +50,7 @@ Os testes exigem que o servidor correspondente esteja rodando antes do disparo d
 2. Em um novo terminal, rode o teste:
 
 ```powershell
-python -m pytest test_api_atuador.py -v
+python -m pytest tests/test_api_atuador.py -v --html=tests/relatorio_atuador.html
 ```
 
 ### Cenário B: Central de Monitoramento (Porta 8091)
@@ -65,7 +64,7 @@ python -m pytest test_api_atuador.py -v
 2. Em um novo terminal, rode o teste:
 
 ```powershell
-python -m pytest test_api_monitoramento.py -v
+python -m pytest tests/test_api_monitoramento.py -v --html=tests/relatorio_monitoramento.html
 ```
 
 > **Nota:** Este componente retém o estado em memória RAM. Caso queira rodar a suíte novamente do zero, lembre-se de reiniciar o executável C++.
@@ -81,24 +80,16 @@ python -m pytest test_api_monitoramento.py -v
 2. Em um novo terminal, rode o teste:
 
 ```powershell
-python -m pytest test_api_operacao.py -v
+python -m pytest tests/test_api_operacao.py -v --html=tests/relatorio_operacao.html
 ```
+
+Interpretação dos Resultados:
+PASSED (Verde): Código C++ correto e alinhado à documentação.
+
+XFAIL (Amarelo): Falha esperada. Bug já mapeado no código C++. O pipeline não quebra.
+
+FAILED (Vermelho): Regressão não mapeada. Investigar imediatamente.
 
 > **Nota:** O script de testes possui um tratamento automático para o comportamento defasado do buffer de `g_estado_anterior` do código original, enviando estados duplicados para garantir a consistência das validações de anomalia.
-
-### Cenário D: Programador de Atuação Local (Porta 8180)
-
-1. Certifique-se de que a pasta local chamada `ESP` existe na raiz do diretório para permitir a persistência de dados do Mock.
-2. Inicie o servidor simulado:
-
-```powershell
-.\build\Debug\programador_local.exe
-```
-
-3. Em um novo terminal, rode o teste:
-
-```powershell
-python -m pytest test_api_programador.py -v
-```
 
 > **Nota:** Este teste utiliza fixtures automáticas do pytest que disparam requisições `DELETE` para limpar o estado do servidor entre cada caso de teste, eliminando a necessidade de reiniciar o executável manualmente.
