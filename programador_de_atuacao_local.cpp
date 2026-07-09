@@ -472,6 +472,36 @@ HttpResponse handleRequest(const HttpRequest& request) {
       return processarEstimulo(estimulo.str());
     }
 
+    // Resultado do reconhecimento de audio, enviado pelo Processador de
+    // audio (camada B):
+    //   { "type": "command", "payload": "abrir" }
+    // Comandos conhecidos: abrir, foto, descer, parar. O comando e
+    // traduzido para o formato de estimulo (payload -> acao_detectada) e
+    // segue o mesmo fluxo de processamento do /processar-estimulo.
+    if (request.path == "/audioUpdate") {
+      std::string tipo;
+      if (!extractString(request.body, "type", tipo)) tipo = "command";
+
+      std::string comando;
+      if (!extractString(request.body, "payload", comando) || comando.empty()) {
+        registrarEvento("audio_invalido", request.body);
+        saveData();
+        return {400, "{\"erro\":\"Campo payload obrigatorio\"}"};
+      }
+
+      // Tipos futuros (ex.: telemetria) sao aceitos sem virar estimulo
+      if (tipo != "command") {
+        registrarEvento("audio_tipo_nao_suportado", request.body);
+        saveData();
+        return {200, "{\"mensagem\":\"Aceito\",\"motivo\":\"type nao suportado, nada a processar\"}"};
+      }
+
+      std::ostringstream estimulo;
+      estimulo << "{\"acao_detectada\":\"" << jsonEscape(comando)
+               << "\",\"origem\":\"processador_audio\"}";
+      return processarEstimulo(estimulo.str());
+    }
+
     if (request.path == "/eventos" || request.path == "/logs") {
       registrarEvento("evento_recebido", request.body);
       saveData();
