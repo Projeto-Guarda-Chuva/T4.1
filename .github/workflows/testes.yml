@@ -1,0 +1,29 @@
+name: QA - Equipe T4.1
+
+on:
+  push:
+    branches:
+      - main
+
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  testes:
+    name: Testes T4.1
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout do repositório
+        uses: actions/checkout@v4
+
+      - name: Compilar e executar testes
+        run: |
+          cd testes_unity
+
+          g++ test_main.cpp unity.c ../programador_de_atuacao.cpp \
+            -I . \
+            -o executar_testes
+
+          ./executar_testes
