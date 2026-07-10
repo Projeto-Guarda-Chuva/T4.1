@@ -62,6 +62,8 @@ static size_t strlcpy(char* dst, const char* src, size_t size) {
 #include <cstdlib>
 #include <cstring>
 #include <cstdarg>
+#include <cctype>
+#include <algorithm>
 #include <chrono>
 #include <string>
 #include <thread>
@@ -92,6 +94,7 @@ static constexpr int           MAX_FILA           = 32;
 static constexpr int           HTTP_CMD_TIMEOUT   = 5;     /* segundos */
 static constexpr int           LOG_BUFFER_SIZE    = 4096;
 static constexpr unsigned long PASSO_ESPERA_MS    = 20;    /* granularidade do worker */
+static constexpr int           PADRAO_VELOCIDADE  = 50;    /* velocidade/intensidade padrao p/ comando simples (bug1) */
 
 /* ════════════════════════════════════════════════════════════
    ESTRUTURAS
@@ -229,16 +232,75 @@ static bool parse_url(const char* url,
 }
 
 /* ════════════════════════════════════════════════════════════
+   TRADUCAO PARA O PROTOCOLO JELLYFISH V3 (camada C)
+   Converte um Movimento interno no corpo JSON { "id": N, ... }
+   esperado pelas placas. A acao pode ser um nome (mapeado abaixo)
+   ou ja um id numerico em parametros["id"] (pass-through).
+   Retorna json nulo quando o atuador nao fala Jellyfish (ex.: ptz),
+   caso em que se mantem o formato generico.
+   ════════════════════════════════════════════════════════════ */
+static json traduzir_jellyfish(const Movimento& mv) {
+    /* Pass-through: id explicito no proprio movimento */
+    if (mv.parametros.contains("id") && mv.parametros["id"].is_number_integer())
+        return mv.parametros;
+
+    std::string a = mv.acao;
+    std::transform(a.begin(), a.end(), a.begin(),
+                   [](unsigned char c){ return std::tolower(c); });
+    bool seguro = (a == "parada_seguranca" || a == "parar" || a == "stop");
+
+    json p;
+    if (mv.atuador == "grafico") {                    /* Familia 10 */
+        if (a == "cor" || a == "cor_customizada" || mv.parametros.contains("r")) {
+            p["id"] = 10;
+            p["r"]  = mv.parametros.value("r", 0);
+            p["g"]  = mv.parametros.value("g", 0);
+            p["b"]  = mv.parametros.value("b", 0);
+        } else if (a == "vermelho")               p["id"] = 11;
+        else if (a == "verde")                    p["id"] = 12;
+        else if (a == "azul")                     p["id"] = 13;
+        else if (a == "preto" || a == "limpar" || seguro) p["id"] = 14;
+        else if (a == "branco")                   p["id"] = 15;
+        else                                      p["id"] = 14; /* fallback: limpar */
+    } else if (mv.atuador == "motor_fixo") {          /* Familia 20 */
+        if (a == "abrir")       p["id"] = 21;
+        else if (a == "fechar") p["id"] = 22;
+        else                    p["id"] = 20;         /* parar / seguranca */
+    } else if (mv.atuador == "motor_movel") {         /* Familia 30 */
+        if (a == "subir")       p["id"] = 31;
+        else if (a == "descer") p["id"] = 32;
+        else                    p["id"] = 30;         /* parar / seguranca */
+    } else if (mv.atuador == "audio") {               /* Familia 40 */
+        if (a == "reproduzir" || a == "tocar") {
+            p["id"]   = 41;
+            p["file"] = mv.parametros.value("file", std::string("alerta.mp3"));
+        } else if (a == "volume" || a == "definir_volume") {
+            p["id"]     = 42;
+            p["volume"] = mv.parametros.value("volume", 50);
+        } else {
+            p["id"] = 40;                             /* parar / seguranca */
+        }
+    } else {
+        return json();                                /* sem protocolo Jellyfish */
+    }
+    return p;
+}
+
+/* ════════════════════════════════════════════════════════════
    INTERFACE COM A CAMADA INFERIOR (C - Biblioteca)
-   "Linguagem basica de comando" para os atuadores.
+   Envia o comando no protocolo Jellyfish V3; para atuadores fora do
+   protocolo (ex.: ptz), usa o formato generico interno.
    ════════════════════════════════════════════════════════════ */
 static void enviar_comando_atuador(const Movimento& mv) {
-    json cmd;
-    cmd["atuador"]    = mv.atuador;
-    cmd["acao"]       = mv.acao;
-    cmd["parametros"] = mv.parametros;
-    cmd["duracao_ms"] = mv.duracao_ms;
-    cmd["origem"]     = "atuador_central";
+    json cmd = traduzir_jellyfish(mv);
+    bool jellyfish = !cmd.is_null();
+    if (!jellyfish) {
+        cmd["atuador"]    = mv.atuador;
+        cmd["acao"]       = mv.acao;
+        cmd["parametros"] = mv.parametros;
+        cmd["duracao_ms"] = mv.duracao_ms;
+        cmd["origem"]     = "atuador_central";
+    }
 
     std::string url;
     {
@@ -250,11 +312,11 @@ static void enviar_comando_atuador(const Movimento& mv) {
 
     if (url.empty()) {
         /* Modo simulacao: atuador da camada C ainda nao conectado */
-        std::printf("[ATUADOR~sim] %s :: %s %s\n",
+        std::printf("[ATUADOR~sim] %s :: %s -> %s\n",
                     mv.atuador.c_str(), mv.acao.c_str(),
-                    mv.parametros.dump().c_str());
-        log_append("[ATUADOR~sim] %s acao=%s",
-                   mv.atuador.c_str(), mv.acao.c_str());
+                    cmd.dump().c_str());
+        log_append("[ATUADOR~sim] %s acao=%s jellyfish=%s",
+                   mv.atuador.c_str(), mv.acao.c_str(), cmd.dump().c_str());
         return;
     }
 
@@ -517,11 +579,15 @@ static void registrar_rotas() {
 
     /* ─── POST /programar ────────────────────────────────── *
      * Interface principal com o Programador de atuacao.
-     * Body:
+     * Body (completo):
      *   { "id": "...", "origem": "programador_de_atuacao",
      *     "completa": true|false, "prioridade": "imediata|proxima|fila",
      *     "movimentos": [ { "atuador":"motor_movel", "acao":"mover",
      *                       "parametros": {...}, "duracao_ms": 1500 }, ... ] }
+     *
+     * Body (comando simples — item 1c: "movimentos"/"detalhes" e OPCIONAL):
+     *   { "programa": 1, "prioridade": "fim" }
+     * -> aceito, assumindo os parametros de velocidade/intensidade padrao.
      */
     g_server.Post("/programar", [](const httplib::Request& req,
                                    httplib::Response& res) {
@@ -534,9 +600,35 @@ static void registrar_rotas() {
         catch (...) { enviar_erro(res, 400, "JSON invalido"); return; }
 
         Programacao p = parse_programacao(body);
+
+        /* ─── Correcao Bug 1 (especificacao, item 1c) ─────────────────────
+         * O campo de movimentos/detalhes e OPCIONAL. Comandos simples como
+         * {"programa": N, "prioridade": "..."} devem ser ACEITOS (201),
+         * assumindo os parametros de velocidade/intensidade PADRAO da
+         * escultura. Quando nao vier um array "movimentos", sintetiza-se
+         * um movimento padrao em vez de rejeitar com 400.
+         * O payload completo com "movimentos" continua funcionando igual. */
         if (p.movimentos.empty()) {
-            enviar_erro(res, 400, "programacao sem movimentos"); return;
+            if (body.contains("programa")) {
+                std::string prog_ref = body["programa"].is_string()
+                        ? body["programa"].get<std::string>()
+                        : std::to_string(body.value("programa", 0));
+                p.id = std::string("PRG_") + prog_ref;
+            }
+
+            Movimento mv;
+            mv.atuador                  = body.value("atuador", std::string("motor_movel"));
+            mv.acao                     = body.value("acao",    std::string("mover"));
+            mv.parametros["velocidade"] = PADRAO_VELOCIDADE;   /* intensidade padrao */
+            if (body.contains("programa"))
+                mv.parametros["programa"] = body["programa"];
+            mv.duracao_ms               = body.value("duracao_ms", (unsigned long)1000);
+            p.movimentos.push_back(mv);
+
+            log_append("[PROGRAMAR] comando simples aceito (movimento padrao) id=%s vel=%d",
+                       p.id.c_str(), PADRAO_VELOCIDADE);
         }
+
         std::string prioridade = body.value("prioridade", std::string("fila"));
 
         std::lock_guard<std::recursive_mutex> lk(g_mutex);
@@ -728,6 +820,25 @@ int main() {
     std::printf("\n");
     std::printf("=== ATUADOR CENTRAL (Camada B - Plataforma) ===\n");
     log_append("Sistema iniciando");
+
+    /* Bootstrap das URLs dos atuadores da camada C (T2.2) via variaveis
+       de ambiente (docker-compose). Sem valor, o atuador opera em modo
+       simulacao. Podem ser sobrescritas em runtime por POST /config/atuadores. */
+    struct { const char* atuador; const char* env; } mapa_env[] = {
+        { "motor_movel", "ATUADOR_MOTOR_MOVEL_URL" },
+        { "motor_fixo",  "ATUADOR_MOTOR_FIXO_URL"  },
+        { "iluminacao",  "ATUADOR_ILUMINACAO_URL"  },
+        { "audio",       "ATUADOR_AUDIO_URL"       },
+        { "grafico",     "ATUADOR_GRAFICO_URL"     },
+        { "ptz",         "ATUADOR_PTZ_URL"         },
+    };
+    for (auto& m : mapa_env) {
+        if (const char* url = std::getenv(m.env)) {
+            g_atuadores[m.atuador] = url;
+            std::printf("[CONFIG] atuador %s -> %s\n", m.atuador, url);
+            log_append("[CONFIG] atuador %s -> %s", m.atuador, url);
+        }
+    }
 
     registrar_rotas();
 

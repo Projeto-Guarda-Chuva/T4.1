@@ -41,7 +41,6 @@ def test_06_programacao_invalida_deve_retornar_400():
     res = requests.post(f"{BASE_URL}/programar", data="ISSO_NAO_E_JSON")
     assert res.status_code == 400
 
-@pytest.mark.xfail(reason="BUG BACKEND: Rota /programar rejeita JSON válido com Erro 400")
 def test_07_programacao_valida_deve_enfileirar():
     """Testa o POST /programar (Fluxo normal)"""
     payload = {
@@ -51,7 +50,6 @@ def test_07_programacao_valida_deve_enfileirar():
     res = requests.post(f"{BASE_URL}/programar", json=payload)
     assert res.status_code in [200, 201]
 
-@pytest.mark.xfail(reason="BUG BACKEND: Rota /programar rejeita JSON válido com Erro 400")
 def test_08_programacao_prioridade_imediata_deve_aceitar():
     """Testa o POST /programar (Prioridade Imediata)"""
     payload = {
@@ -95,7 +93,6 @@ def test_13_acionar_retomar_deve_liberar_atuador():
     res = requests.post(f"{BASE_URL}/retomar", json={})
     assert res.status_code == 200
 
-@pytest.mark.xfail(reason="BUG BACKEND: Rota /programar rejeita JSON válido com Erro 400")
 def test_14_programar_apos_retomar_deve_funcionar():
     """Garante que o bloqueio foi removido após o reset"""
     payload = {
