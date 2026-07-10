@@ -28,17 +28,17 @@ def test_04_consultar_config_deve_retornar_200():
 
 @pytest.mark.xfail(reason="BUG BACKEND: Falta validação. Retorna 200 em vez de 400 para JSON incompleto")
 def test_05_amostra_incompleta_deve_retornar_400():
-    """Testa o POST /monitoramento com falta de campos"""
-    payload = {"dados": {"velocidade": 10}}
+    """Testa o POST /monitoramento com falta de campos (agora usando 'data')"""
+    payload = {"data": {"velocidade": 10}}
     res = requests.post(f"{BASE_URL}/monitoramento", json=payload)
     assert res.status_code == 400
 
 def test_06_amostra_irrelevante_nao_deve_ser_repassada():
     """Testa o POST /monitoramento (Velocidade baixa e sem mudança)"""
     payload = {
-        "origem": "jetson",
-        "tipo": "velocidade",
-        "dados": {"velocidade": 10, "programa": 1, "status": "operacional"}
+        "device": "NVIDIA_Jetson",
+        "type": "event",
+        "data": {"velocidade": 10, "programa": 1, "status": "operacional"}
     }
     requests.post(f"{BASE_URL}/monitoramento", json=payload)
     
@@ -50,9 +50,9 @@ def test_06_amostra_irrelevante_nao_deve_ser_repassada():
 def test_07_amostra_importante_deve_ser_repassada():
     """Testa o POST /monitoramento (Velocidade acima do limiar)"""
     payload = {
-        "origem": "jetson",
-        "tipo": "velocidade",
-        "dados": {"velocidade": 150, "programa": 1, "status": "operacional"}
+        "device": "NVIDIA_Jetson",
+        "type": "event",
+        "data": {"velocidade": 150, "programa": 1, "status": "operacional"}
     }
     res = requests.post(f"{BASE_URL}/monitoramento", json=payload)
     assert res.status_code in [200, 201]
@@ -60,19 +60,29 @@ def test_07_amostra_importante_deve_ser_repassada():
 def test_08_estado_sem_programa_deve_reter_repasse():
     """Testa o POST /monitoramento (Programa desconhecido/0)"""
     payload = {
-        "origem": "p4",
-        "tipo": "status",
-        "dados": {"velocidade": 50, "programa": 0, "status": "operacional"}
+        "device": "p4",
+        "type": "status",
+        "data": {"velocidade": 50, "programa": 0, "status": "operacional"}
     }
     res = requests.post(f"{BASE_URL}/monitoramento", json=payload)
     assert res.status_code in [200, 201]
 
 def test_09_consultar_agregado_deve_retornar_dados_consolidados():
-    """Testa o GET /agregado"""
+    """Testa o GET /agregado validando a estrutura da resposta"""
+    payload_garantia = {
+        "device": "NVIDIA_Jetson",
+        "component": "NVIDIA_Jetson", 
+        "type": "event",
+        "data": {"velocidade": 120, "programa": 1, "status": "operacional"}
+    }
+    requests.post(f"{BASE_URL}/monitoramento", json=payload_garantia)
+    
     res = requests.get(f"{BASE_URL}/agregado")
     assert res.status_code == 200
-    dados = res.text.lower()
-    assert "jetson" in dados or "p4" in dados
+    
+    dados = res.json()
+    assert "consolidado" in dados
+    assert "por_origem" in dados
 
 def test_10_consultar_buffer_deve_retornar_amostras():
     """Testa o GET /buffer"""

@@ -94,6 +94,7 @@ static constexpr int           MAX_FILA           = 32;
 static constexpr int           HTTP_CMD_TIMEOUT   = 5;     /* segundos */
 static constexpr int           LOG_BUFFER_SIZE    = 4096;
 static constexpr unsigned long PASSO_ESPERA_MS    = 20;    /* granularidade do worker */
+static constexpr int           PADRAO_VELOCIDADE  = 50;    /* velocidade/intensidade padrao p/ comando simples (bug1) */
 
 /* ════════════════════════════════════════════════════════════
    ESTRUTURAS
@@ -578,11 +579,15 @@ static void registrar_rotas() {
 
     /* ─── POST /programar ────────────────────────────────── *
      * Interface principal com o Programador de atuacao.
-     * Body:
+     * Body (completo):
      *   { "id": "...", "origem": "programador_de_atuacao",
      *     "completa": true|false, "prioridade": "imediata|proxima|fila",
      *     "movimentos": [ { "atuador":"motor_movel", "acao":"mover",
      *                       "parametros": {...}, "duracao_ms": 1500 }, ... ] }
+     *
+     * Body (comando simples — item 1c: "movimentos"/"detalhes" e OPCIONAL):
+     *   { "programa": 1, "prioridade": "fim" }
+     * -> aceito, assumindo os parametros de velocidade/intensidade padrao.
      */
     g_server.Post("/programar", [](const httplib::Request& req,
                                    httplib::Response& res) {
@@ -595,9 +600,35 @@ static void registrar_rotas() {
         catch (...) { enviar_erro(res, 400, "JSON invalido"); return; }
 
         Programacao p = parse_programacao(body);
+
+        /* ─── Correcao Bug 1 (especificacao, item 1c) ─────────────────────
+         * O campo de movimentos/detalhes e OPCIONAL. Comandos simples como
+         * {"programa": N, "prioridade": "..."} devem ser ACEITOS (201),
+         * assumindo os parametros de velocidade/intensidade PADRAO da
+         * escultura. Quando nao vier um array "movimentos", sintetiza-se
+         * um movimento padrao em vez de rejeitar com 400.
+         * O payload completo com "movimentos" continua funcionando igual. */
         if (p.movimentos.empty()) {
-            enviar_erro(res, 400, "programacao sem movimentos"); return;
+            if (body.contains("programa")) {
+                std::string prog_ref = body["programa"].is_string()
+                        ? body["programa"].get<std::string>()
+                        : std::to_string(body.value("programa", 0));
+                p.id = std::string("PRG_") + prog_ref;
+            }
+
+            Movimento mv;
+            mv.atuador                  = body.value("atuador", std::string("motor_movel"));
+            mv.acao                     = body.value("acao",    std::string("mover"));
+            mv.parametros["velocidade"] = PADRAO_VELOCIDADE;   /* intensidade padrao */
+            if (body.contains("programa"))
+                mv.parametros["programa"] = body["programa"];
+            mv.duracao_ms               = body.value("duracao_ms", (unsigned long)1000);
+            p.movimentos.push_back(mv);
+
+            log_append("[PROGRAMAR] comando simples aceito (movimento padrao) id=%s vel=%d",
+                       p.id.c_str(), PADRAO_VELOCIDADE);
         }
+
         std::string prioridade = body.value("prioridade", std::string("fila"));
 
         std::lock_guard<std::recursive_mutex> lk(g_mutex);
