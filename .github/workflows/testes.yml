@@ -41,7 +41,7 @@ jobs:
 
       - name: Compilar Componentes da Camada B (CMake)
         run: |
-          cmake -S . -B build
+          cmake -S . -B build -DCMAKE_CXX_FLAGS="-fpermissive"
           cmake --build build
 
       # ==========================================
