@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - main
-
   pull_request:
     branches:
       - main
@@ -18,12 +17,70 @@ jobs:
       - name: Checkout do repositório
         uses: actions/checkout@v4
 
-      - name: Compilar e executar testes
+      # ==========================================
+      # 1. TESTES UNITÁRIOS ORIGINAIS (UNITY)
+      # ==========================================
+      - name: Compilar e executar testes unitários (Unity)
         run: |
           cd testes_unity
-
           g++ test_main.cpp unity.c ../programador_de_atuacao.cpp \
             -I . \
             -o executar_testes
-
           ./executar_testes
+
+      # ==========================================
+      # 2. PREPARAÇÃO DO AMBIENTE (NOVO README)
+      # ==========================================
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Instalar dependências Python
+        run: pip install pytest requests pytest-html
+
+      - name: Compilar Componentes da Camada B (CMake)
+        run: |
+          cmake -S . -B build
+          cmake --build build
+
+      # ==========================================
+      # 3. TESTES DE INTEGRAÇÃO / API
+      # ==========================================
+      - name: Cenário A - Atuador Central (Porta 8090)
+        run: |
+          # 1. Inicia o servidor em background (&)
+          ./build/atuador_central & 
+          PID=$!
+          # 2. Aguarda 3 segundos para o servidor abrir a porta
+          sleep 3 
+          # 3. Roda o Pytest
+          python -m pytest tests/test_api_atuador.py -v --html=tests/relatorio_atuador.html
+          # 4. Encerra o servidor para limpar a porta
+          kill $PID
+
+      - name: Cenário B - Central de Monitoramento (Porta 8091)
+        run: |
+          ./build/central_monitoramento &
+          PID=$!
+          sleep 3
+          python -m pytest tests/test_api_monitoramento.py -v --html=tests/relatorio_monitoramento.html
+          kill $PID
+
+      - name: Cenário C - Central de Operação (Porta 8080)
+        run: |
+          ./build/central_operacao &
+          PID=$!
+          sleep 3
+          python -m pytest tests/test_api_operacao.py -v --html=tests/relatorio_operacao.html
+          kill $PID
+
+      # ==========================================
+      # 4. SALVAR RELATÓRIOS (BÔNUS DE QA)
+      # ==========================================
+      - name: Arquivar Relatórios HTML
+        uses: actions/upload-artifact@v4
+        if: always() # Garante que vai salvar mesmo se algum teste falhar (vermelho)
+        with:
+          name: relatorios-pytest
+          path: tests/*.html
